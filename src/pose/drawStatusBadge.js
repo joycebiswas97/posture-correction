@@ -3,11 +3,12 @@
  * This ensures that when the canvas is streamed via Picture-in-Picture (PiP),
  * the user sees their live status indicator floating over any application (VS Code, etc.).
  */
-export function drawStatusBadge(ctx, { status = "searching", label = "Searching" } = {}) {
+export function drawStatusBadge(ctx, { status = "searching", label = "Searching", score = null } = {}) {
   const { width } = ctx.canvas;
   const padding = Math.max(12, Math.round(width * 0.025));
   const badgeHeight = Math.max(34, Math.round(width * 0.065));
-  const badgeWidth = Math.max(160, Math.round(width * 0.32));
+  const hasScore = typeof score === "number" && score > 0;
+  const badgeWidth = Math.max(160, Math.round(width * (hasScore ? 0.36 : 0.32)));
   const x = padding;
   const y = padding;
   const radius = 10;
@@ -67,8 +68,12 @@ export function drawStatusBadge(ctx, { status = "searching", label = "Searching"
   ctx.font = `600 ${fontSize}px system-ui, -apple-system, sans-serif`;
   ctx.fillStyle = textColor;
   ctx.textBaseline = "middle";
-  ctx.fillText(label.toUpperCase(), dotX + dotRadius * 2.2, dotY);
+
+  const displayText = hasScore
+    ? `${label.toUpperCase()} · ${score}%`
+    : label.toUpperCase();
+
+  ctx.fillText(displayText, dotX + dotRadius * 2.2, dotY);
 
   ctx.restore();
 }
-

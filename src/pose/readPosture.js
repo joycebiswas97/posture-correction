@@ -11,8 +11,10 @@ function usable(point) {
 
 /**
  * Extracts raw posture metrics from MediaPipe landmarks:
- * - noseToShoulder: vertical distance between nose and shoulder line (normalized 0–1)
- * - shoulderTilt: difference between left and right shoulder height (normalized 0–1)
+ * - noseToShoulder: vertical distance between nose and shoulder midpoint (0–1)
+ * - shoulderTilt: vertical difference between left and right shoulders (0–1)
+ * - shoulderWidth: horizontal span between shoulders (0–1)
+ * - noseToShoulderRatio: vertical distance divided by shoulder width (scale-invariant)
  */
 export function readPosture(landmarks) {
   if (!landmarks) return null;
@@ -25,45 +27,104 @@ export function readPosture(landmarks) {
   }
 
   const shoulderY = (leftShoulder.y + rightShoulder.y) / 2;
+  const noseToShoulder = shoulderY - nose.y;
+  const shoulderTilt = Math.abs(leftShoulder.y - rightShoulder.y);
+  const shoulderWidth = Math.max(0.05, Math.abs(leftShoulder.x - rightShoulder.x));
+  const noseToShoulderRatio = noseToShoulder / shoulderWidth;
 
   return {
-    noseToShoulder: shoulderY - nose.y,
-    shoulderTilt: Math.abs(leftShoulder.y - rightShoulder.y),
+    noseToShoulder,
+    shoulderTilt,
+    shoulderWidth,
+    noseToShoulderRatio,
   };
 }
 
 /**
- * Evaluates whether current metrics represent good posture or slouching.
- * Uses calibrated baseline if available, or sensible heuristics otherwise.
+ * Evaluates whether current metrics represent upright posture or slouching.
+ * Uses the user's calibrated personal baseline when available, or sensible defaults.
  */
 export function evaluatePosture(metrics, calibration = null) {
   if (!metrics) {
-    return { status: "searching", label: "Searching Pose" };
+    return {
+      status: "searching",
+      label: "Searching Pose",
+      score: 0,
+      reason: "No pose detected in frame",
+    };
   }
 
-  // If user calibrated their upright posture
+  // 1. Personalized Evaluation (Calibrated Baseline)
   if (calibration && typeof calibration.noseToShoulder === "number") {
-    // 15% drop from calibrated baseline indicates head forward/slouch
-    const minNoseDist = calibration.noseToShoulder * 0.85;
-    // Allow small natural movement, flag if shoulder tilt exceeds baseline + 5%
+    const baseRatio = calibration.noseToShoulderRatio || (calibration.noseToShoulder / Math.max(0.1, calibration.shoulderWidth || 0.3));
+    const currentRatio = metrics.noseToShoulderRatio;
+
+    // A drop > 18% in neck-to-shoulder ratio indicates forward head / slouching
+    const ratioThreshold = baseRatio * 0.82;
+    // Allow slight natural head/body movements; flag if shoulders tilt more than baseline + 5%
     const maxTilt = Math.max(0.06, (calibration.shoulderTilt || 0.02) + 0.05);
 
-    if (metrics.noseToShoulder < minNoseDist) {
-      return { status: "slouch", label: "Slouch Detected", reason: "Head dropped forward" };
+    const isHeadDropped = currentRatio < ratioThreshold || metrics.noseToShoulder < calibration.noseToShoulder * 0.80;
+    const isShoulderTilted = metrics.shoulderTilt > maxTilt;
+
+    // Calculate alignment score (0 - 100%)
+    const ratioScore = Math.min(100, Math.max(0, Math.round((currentRatio / baseRatio) * 100)));
+    const tiltPenalty = Math.min(30, Math.round((metrics.shoulderTilt / maxTilt) * 20));
+    const score = Math.max(0, Math.min(100, ratioScore - (isShoulderTilted ? tiltPenalty : 0)));
+
+    if (isHeadDropped) {
+      return {
+        status: "slouch",
+        label: "Slouch Detected",
+        reason: "Head dropped forward",
+        score,
+      };
     }
-    if (metrics.shoulderTilt > maxTilt) {
-      return { status: "slouch", label: "Slouch Detected", reason: "Shoulders unlevel" };
+
+    if (isShoulderTilted) {
+      return {
+        status: "slouch",
+        label: "Slouch Detected",
+        reason: "Shoulders unlevel",
+        score,
+      };
     }
-    return { status: "good", label: "Good Posture" };
+
+    return {
+      status: "good",
+      label: "Good Posture",
+      score,
+      reason: "Aligned with your calibrated baseline",
+    };
   }
 
-  // Uncalibrated defaults
+  // 2. Uncalibrated Default Heuristics
+  const uncalibratedScore = Math.round(
+    Math.min(100, Math.max(0, (metrics.noseToShoulder / 0.18) * 100))
+  );
+
   if (metrics.noseToShoulder < 0.12) {
-    return { status: "slouch", label: "Slouch Detected", reason: "Head dropped forward" };
-  }
-  if (metrics.shoulderTilt > 0.08) {
-    return { status: "slouch", label: "Slouch Detected", reason: "Shoulders unlevel" };
+    return {
+      status: "slouch",
+      label: "Slouch Detected",
+      reason: "Head dropped forward",
+      score: uncalibratedScore,
+    };
   }
 
-  return { status: "good", label: "Good Posture" };
+  if (metrics.shoulderTilt > 0.08) {
+    return {
+      status: "slouch",
+      label: "Slouch Detected",
+      reason: "Shoulders unlevel",
+      score: uncalibratedScore,
+    };
+  }
+
+  return {
+    status: "good",
+    label: "Good Posture",
+    score: uncalibratedScore,
+    reason: "Upright (default thresholds)",
+  };
 }
