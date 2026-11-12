@@ -25,8 +25,27 @@ function snapshotPose(result) {
   return pose.map((point) => ({
     x: point.x,
     y: point.y,
+    z: point.z ?? 0,
     visibility: point.visibility ?? 0,
   }));
+}
+
+/**
+ * Exponential Moving Average (EMA) low-pass filter.
+ * Smooths out natural webcam frame-to-frame noise and micro-jitter without adding latency.
+ */
+function smoothMetrics(prev, current, alpha = 0.25) {
+  if (!prev) return current;
+  return {
+    noseToShoulder: prev.noseToShoulder * (1 - alpha) + current.noseToShoulder * alpha,
+    shoulderTilt: prev.shoulderTilt * (1 - alpha) + current.shoulderTilt * alpha,
+    shoulderWidth: prev.shoulderWidth * (1 - alpha) + current.shoulderWidth * alpha,
+    noseToShoulderRatio: prev.noseToShoulderRatio * (1 - alpha) + current.noseToShoulderRatio * alpha,
+    headScale: prev.headScale * (1 - alpha) + current.headScale * alpha,
+    headToShoulderRatio: prev.headToShoulderRatio * (1 - alpha) + current.headToShoulderRatio * alpha,
+    headForwardDepth: prev.headForwardDepth * (1 - alpha) + current.headForwardDepth * alpha,
+    headY: prev.headY * (1 - alpha) + current.headY * alpha,
+  };
 }
 
 export function usePoseCamera({
@@ -50,6 +69,16 @@ export function usePoseCamera({
   const frameCountRef = useRef(0);
   const fpsStampRef = useRef(0);
   const calibrationRef = useRef(calibration);
+
+  // Temporal smoothing & hysteresis debounce refs
+  const smoothedMetricsRef = useRef(null);
+  const confirmedStatusRef = useRef({
+    status: "searching",
+    label: "Searching Pose",
+    score: 0,
+  });
+  const slouchStreakRef = useRef(0);
+  const goodStreakRef = useRef(0);
 
   const [modelState, setModelState] = useState("loading");
   const [delegate, setDelegate] = useState("");
@@ -189,15 +218,50 @@ export function usePoseCamera({
       }
       ctx.restore();
 
-      // Read current posture metrics (nose-to-shoulder, tilt)
-      const currentMetrics = readPosture(landmarksRef.current);
-      setMetrics(currentMetrics);
+      // Read raw metrics & apply EMA low-pass filter to remove sensor noise
+      const rawMetrics = readPosture(landmarksRef.current);
+      const smoothed = rawMetrics
+        ? smoothMetrics(smoothedMetricsRef.current, rawMetrics, 0.25)
+        : null;
+      smoothedMetricsRef.current = smoothed;
+      setMetrics(smoothed);
 
-      const evaluation = evaluatePosture(currentMetrics, calibrationRef.current);
-      setPostureStatus(evaluation);
+      if (smoothed) {
+        const rawEval = evaluatePosture(
+          smoothed,
+          calibrationRef.current,
+          confirmedStatusRef.current.status
+        );
 
-      // Render the high-contrast posture status badge on the canvas (mirrored restored)
-      drawStatusBadge(ctx, evaluation);
+        // Hysteresis Confirmation: require 4 consecutive frames (~270ms) to switch to slouch,
+        // and 3 consecutive frames to switch back to good. Eliminates frame chatter!
+        if (rawEval.status === "slouch") {
+          slouchStreakRef.current += 1;
+          goodStreakRef.current = 0;
+          if (slouchStreakRef.current >= 4 || confirmedStatusRef.current.status === "slouch") {
+            confirmedStatusRef.current = rawEval;
+          }
+        } else if (rawEval.status === "good") {
+          goodStreakRef.current += 1;
+          slouchStreakRef.current = 0;
+          if (goodStreakRef.current >= 3 || confirmedStatusRef.current.status === "good") {
+            confirmedStatusRef.current = rawEval;
+          }
+        } else {
+          confirmedStatusRef.current = rawEval;
+        }
+      } else {
+        confirmedStatusRef.current = {
+          status: "searching",
+          label: "Searching Pose",
+          score: 0,
+        };
+      }
+
+      setPostureStatus(confirmedStatusRef.current);
+
+      // Render the high-contrast posture status badge on the canvas
+      drawStatusBadge(ctx, confirmedStatusRef.current);
 
       // Calculate actual rolling FPS
       frameCountRef.current += 1;
@@ -235,7 +299,7 @@ export function usePoseCamera({
   // 1. Camera state (on/off)
   // 2. Tab visibility (hidden/visible)
   // 3. User FPS mode (preview 15 FPS vs saver 1 FPS)
-  // 4. Picture-in-Picture state (if PiP is active, user is actively watching -> keep 15 FPS!)
+  // 4. Picture-in-Picture state (if PiP is active, keep 15 FPS)
   useEffect(() => {
     if (cameraState !== "on") {
       cancelAnimationFrame(rafRef.current);
@@ -246,9 +310,6 @@ export function usePoseCamera({
     const ticker = workerRef.current;
     const pipActive = isPipActive || isPipActiveInternal;
 
-    // Run at 1 FPS (Saver Mode) ONLY IF:
-    // - User explicitly set Saver Mode, OR
-    // - The tab is hidden AND PiP is NOT active (nobody is watching the video)
     const runSaverRate = fpsMode === "saver" || (isTabHidden && !pipActive);
 
     if (runSaverRate) {
@@ -257,16 +318,12 @@ export function usePoseCamera({
       return;
     }
 
-    // Otherwise, user is in Preview Mode (15 FPS target)!
-    // If the tab is hidden but PiP is active, browser pauses requestAnimationFrame.
-    // The Web Worker MUST drive the 15 FPS cadence so the floating PiP window remains smooth!
     if (isTabHidden) {
       cancelAnimationFrame(rafRef.current);
       ticker?.start(PREVIEW_INTERVAL_MS);
       return;
     }
 
-    // If the tab is visible and Preview Mode is active: drive via requestAnimationFrame
     ticker?.stop();
     let isCancelled = false;
 
@@ -297,6 +354,10 @@ export function usePoseCamera({
     streamRef.current = null;
     landmarksRef.current = null;
     lastTimestampRef.current = -1;
+    smoothedMetricsRef.current = null;
+    slouchStreakRef.current = 0;
+    goodStreakRef.current = 0;
+    confirmedStatusRef.current = { status: "searching", label: "Camera Off", score: 0 };
 
     const video = videoRef.current;
     if (video) video.srcObject = null;
@@ -355,6 +416,9 @@ export function usePoseCamera({
 
       frameCountRef.current = 0;
       fpsStampRef.current = 0;
+      smoothedMetricsRef.current = null;
+      slouchStreakRef.current = 0;
+      goodStreakRef.current = 0;
       runningRef.current = true;
       setCameraState("on");
     } catch (startError) {

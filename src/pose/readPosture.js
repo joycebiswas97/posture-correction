@@ -1,7 +1,11 @@
 import {
+  LEFT_EAR,
+  LEFT_EYE,
   LEFT_SHOULDER,
   MIN_VISIBILITY,
   NOSE,
+  RIGHT_EAR,
+  RIGHT_EYE,
   RIGHT_SHOULDER,
 } from "./constants";
 
@@ -10,11 +14,13 @@ function usable(point) {
 }
 
 /**
- * Extracts raw posture metrics from MediaPipe landmarks:
- * - noseToShoulder: vertical distance between nose and shoulder midpoint (0–1)
- * - shoulderTilt: vertical difference between left and right shoulders (0–1)
- * - shoulderWidth: horizontal span between shoulders (0–1)
- * - noseToShoulderRatio: vertical distance divided by shoulder width (scale-invariant)
+ * Extracts comprehensive 3D and 2D posture metrics from MediaPipe landmarks:
+ * - headForwardDepth: 3D Z-depth displacement of head relative to torso (MediaPipe Z-axis)
+ * - headToShoulderRatio: optical head size vs shoulder span (primary forward leaning metric)
+ * - headScale: optical width of head in frame
+ * - headY: vertical level of head relative to camera frame / background
+ * - noseToShoulderRatio: vertical distance divided by shoulder width (lenient secondary metric)
+ * - shoulderTilt: vertical difference between left and right shoulders
  */
 export function readPosture(landmarks) {
   if (!landmarks) return null;
@@ -22,29 +28,62 @@ export function readPosture(landmarks) {
   const nose = landmarks[NOSE];
   const leftShoulder = landmarks[LEFT_SHOULDER];
   const rightShoulder = landmarks[RIGHT_SHOULDER];
+
   if (!usable(nose) || !usable(leftShoulder) || !usable(rightShoulder)) {
     return null;
   }
 
+  // Calculate shoulder midpoints
   const shoulderY = (leftShoulder.y + rightShoulder.y) / 2;
-  const noseToShoulder = shoulderY - nose.y;
-  const shoulderTilt = Math.abs(leftShoulder.y - rightShoulder.y);
+  const shoulderZ = ((leftShoulder.z ?? 0) + (rightShoulder.z ?? 0)) / 2;
   const shoulderWidth = Math.max(0.05, Math.abs(leftShoulder.x - rightShoulder.x));
+  const shoulderTilt = Math.abs(leftShoulder.y - rightShoulder.y);
+
+  // Vertical distance of nose above shoulders
+  const noseToShoulder = shoulderY - nose.y;
   const noseToShoulderRatio = noseToShoulder / shoulderWidth;
+
+  // Head scale: try ear-to-ear first; fall back to eye-to-eye * 1.8 if wearing headphones/hair covers ears
+  const leftEar = landmarks[LEFT_EAR];
+  const rightEar = landmarks[RIGHT_EAR];
+  const leftEye = landmarks[LEFT_EYE];
+  const rightEye = landmarks[RIGHT_EYE];
+
+  let headSpan = 0.12;
+  if (usable(leftEar) && usable(rightEar)) {
+    headSpan = Math.abs(leftEar.x - rightEar.x);
+  } else if (usable(leftEye) && usable(rightEye)) {
+    headSpan = Math.abs(leftEye.x - rightEye.x) * 1.8;
+  }
+
+  const headScale = Math.max(0.04, headSpan);
+  // Key forward leaning ratio: as you lean toward the camera, head appears larger relative to shoulders
+  const headToShoulderRatio = headScale / shoulderWidth;
+
+  // 3D Forward Depth: In MediaPipe Z coordinates, smaller/negative Z means closer to camera.
+  // When head cranes forward towards screen away from shoulders, (shoulderZ - nose.z) increases.
+  const headForwardDepth = shoulderZ - (nose.z ?? 0);
+
+  // Head vertical position against the camera frame / background
+  const headY = nose.y;
 
   return {
     noseToShoulder,
     shoulderTilt,
     shoulderWidth,
     noseToShoulderRatio,
+    headScale,
+    headToShoulderRatio,
+    headForwardDepth,
+    headY,
   };
 }
 
 /**
- * Evaluates whether current metrics represent upright posture or slouching.
- * Uses the user's calibrated personal baseline when available, or sensible defaults.
+ * Evaluates posture focusing primarily on FORWARD LEANING.
+ * Highly stable with generous vertical allowance (looking down at keyboard or normal shifts are allowed).
  */
-export function evaluatePosture(metrics, calibration = null) {
+export function evaluatePosture(metrics, calibration = null, currentStatus = "good") {
   if (!metrics) {
     return {
       status: "searching",
@@ -54,29 +93,79 @@ export function evaluatePosture(metrics, calibration = null) {
     };
   }
 
-  // 1. Personalized Evaluation (Calibrated Baseline)
+  const wasSlouching = currentStatus === "slouch";
+
+  // 1. Personalized Evaluation against Calibrated Baseline
   if (calibration && typeof calibration.noseToShoulder === "number") {
-    const baseRatio = calibration.noseToShoulderRatio || (calibration.noseToShoulder / Math.max(0.1, calibration.shoulderWidth || 0.3));
+    // -------------------------------------------------------------
+    // PRIMARY CRITERIA: FORWARD LEANING (Craning neck toward screen)
+    // -------------------------------------------------------------
+    const baseHeadRatio = calibration.headToShoulderRatio || 0.45;
+    const headRatioIncrease = metrics.headToShoulderRatio / Math.max(0.1, baseHeadRatio);
+
+    const baseDepth = calibration.headForwardDepth ?? 0;
+    const depthForwardShift = metrics.headForwardDepth - baseDepth;
+
+    // Generous forward leaning allowance with hysteresis:
+    // To enter slouch: head must lean > 28% closer to screen (or combined depth shift > 0.18).
+    // To recover to good: head must return within 18% of baseline.
+    const forwardRatioThreshold = wasSlouching ? 1.18 : 1.28;
+    const forwardDepthThreshold = wasSlouching ? 0.12 : 0.18;
+
+    const isHeadForward =
+      (depthForwardShift > forwardDepthThreshold && headRatioIncrease > 1.15) ||
+      headRatioIncrease > forwardRatioThreshold ||
+      depthForwardShift > (forwardDepthThreshold + 0.08);
+
+    // -------------------------------------------------------------
+    // SECONDARY CRITERIA: VERY LENIENT VERTICAL HEIGHT DROP
+    // (Allows comfortable natural head movements, glancing at keys/notes)
+    // -------------------------------------------------------------
+    const baseRatio =
+      calibration.noseToShoulderRatio ||
+      calibration.noseToShoulder / Math.max(0.1, calibration.shoulderWidth || 0.3);
     const currentRatio = metrics.noseToShoulderRatio;
 
-    // A drop > 18% in neck-to-shoulder ratio indicates forward head / slouching
-    const ratioThreshold = baseRatio * 0.82;
-    // Allow slight natural head/body movements; flag if shoulders tilt more than baseline + 5%
-    const maxTilt = Math.max(0.06, (calibration.shoulderTilt || 0.02) + 0.05);
+    // Only flag vertical slump if head drops > 35% below baseline (0.65)
+    const ratioDropThreshold = wasSlouching ? baseRatio * 0.95 : baseRatio * 0.90;
+    const isHeadDropped = currentRatio < ratioDropThreshold;
 
-    const isHeadDropped = currentRatio < ratioThreshold || metrics.noseToShoulder < calibration.noseToShoulder * 0.80;
+    // Frame drop against background: very lenient (16% drop allowed)
+    const baseHeadY = calibration.headY ?? (metrics.headY - 0.01);
+    const frameDropThreshold = wasSlouching ? 0.02 : 0.05;
+    const isFrameDropped = metrics.headY > baseHeadY + frameDropThreshold;
+
+    // -------------------------------------------------------------
+    // SECONDARY CRITERIA: LENIENT SHOULDER TILT
+    // -------------------------------------------------------------
+    const baseTilt = calibration.shoulderTilt || 0.02;
+    const maxTilt = wasSlouching ? Math.max(0.08, baseTilt + 0.06) : Math.max(0.10, baseTilt + 0.08);
     const isShoulderTilted = metrics.shoulderTilt > maxTilt;
 
-    // Calculate alignment score (0 - 100%)
-    const ratioScore = Math.min(100, Math.max(0, Math.round((currentRatio / baseRatio) * 100)));
-    const tiltPenalty = Math.min(30, Math.round((metrics.shoulderTilt / maxTilt) * 20));
-    const score = Math.max(0, Math.min(100, ratioScore - (isShoulderTilted ? tiltPenalty : 0)));
+    // Continuous smooth alignment score centered on forward posture (0 - 100%)
+    const forwardDeviation = Math.max(0, (headRatioIncrease - 1.0) * 100);
+    const depthDeviation = Math.max(0, depthForwardShift * 120);
+    const primaryPenalty = Math.round(Math.max(forwardDeviation * 2.2, depthDeviation));
+    const verticalPenalty = isHeadDropped ? 25 : Math.max(0, Math.round((1 - (currentRatio / baseRatio)) * 30));
+    const tiltPenalty = isShoulderTilted ? 15 : 0;
 
-    if (isHeadDropped) {
+    const score = Math.max(0, Math.min(100, 100 - primaryPenalty - verticalPenalty - tiltPenalty));
+
+    // Decision based primarily on forward lean
+    if (isHeadForward) {
       return {
         status: "slouch",
         label: "Slouch Detected",
-        reason: "Head dropped forward",
+        reason: "Head leaning too far forward",
+        score,
+      };
+    }
+
+    if (isHeadDropped || isFrameDropped) {
+      return {
+        status: "slouch",
+        label: "Slouch Detected",
+        reason: "Severe head drop / slump",
         score,
       };
     }
@@ -94,25 +183,36 @@ export function evaluatePosture(metrics, calibration = null) {
       status: "good",
       label: "Good Posture",
       score,
-      reason: "Aligned with your calibrated baseline",
+      reason: "Comfortable upright alignment",
     };
   }
 
-  // 2. Uncalibrated Default Heuristics
-  const uncalibratedScore = Math.round(
-    Math.min(100, Math.max(0, (metrics.noseToShoulder / 0.18) * 100))
-  );
+  // 2. Uncalibrated Defaults (Lenient)
+  const isForwardUncalibrated = metrics.headForwardDepth > (wasSlouching ? 0.16 : 0.22);
+  const isDropUncalibrated = metrics.noseToShoulder < (wasSlouching ? 0.09 : 0.07);
+  const isTiltUncalibrated = metrics.shoulderTilt > (wasSlouching ? 0.09 : 0.12);
 
-  if (metrics.noseToShoulder < 0.12) {
+  const uncalibratedScore = Math.max(0, Math.min(100, Math.round((metrics.noseToShoulder / 0.18) * 100)));
+
+  if (isForwardUncalibrated) {
     return {
       status: "slouch",
       label: "Slouch Detected",
-      reason: "Head dropped forward",
+      reason: "Head leaning too far forward",
+      score: Math.max(20, uncalibratedScore - 30),
+    };
+  }
+
+  if (isDropUncalibrated) {
+    return {
+      status: "slouch",
+      label: "Slouch Detected",
+      reason: "Severe head drop / slump",
       score: uncalibratedScore,
     };
   }
 
-  if (metrics.shoulderTilt > 0.08) {
+  if (isTiltUncalibrated) {
     return {
       status: "slouch",
       label: "Slouch Detected",

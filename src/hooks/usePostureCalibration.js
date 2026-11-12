@@ -19,6 +19,7 @@ function loadSavedCalibration() {
 
 /**
  * Manages user's personal upright posture calibration and persistence across reloads.
+ * Records 3D depth, vertical position against background, and optical head scale.
  */
 export function usePostureCalibration() {
   const [calibration, setCalibration] = useState(loadSavedCalibration);
@@ -32,6 +33,10 @@ export function usePostureCalibration() {
       shoulderTilt: currentMetrics.shoulderTilt,
       shoulderWidth: currentMetrics.shoulderWidth,
       noseToShoulderRatio: currentMetrics.noseToShoulderRatio,
+      headScale: currentMetrics.headScale,
+      headToShoulderRatio: currentMetrics.headToShoulderRatio,
+      headForwardDepth: currentMetrics.headForwardDepth,
+      headY: currentMetrics.headY,
       calibratedAt: new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
     };
 
@@ -65,4 +70,3 @@ export function usePostureCalibration() {
     resetCalibration,
   };
 }
-

@@ -20,6 +20,10 @@ export const POSE_LITE_MODEL =
 
 /** Indices inside MediaPipe's 33-point pose. */
 export const NOSE = 0;
+export const LEFT_EYE = 2;
+export const RIGHT_EYE = 5;
+export const LEFT_EAR = 7;
+export const RIGHT_EAR = 8;
 export const LEFT_SHOULDER = 11;
 export const RIGHT_SHOULDER = 12;
 

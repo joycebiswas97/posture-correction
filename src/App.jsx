@@ -406,6 +406,20 @@ export default function App() {
           />
 
           <StatusCard
+            label="Head position (vs Background)"
+            value={
+              !cameraOn || !metrics
+                ? "—"
+                : postureStatus.reason === "Head leaning too far forward"
+                  ? "⚠️ Leaning Forward"
+                  : postureStatus.reason === "Head dropped forward"
+                    ? "⚠️ Dropped Down"
+                    : "✓ Upright & Aligned"
+            }
+            hint="Detects 3D depth and head movement forward away from chair/background."
+          />
+
+          <StatusCard
             label="Power mode"
             value={
               isPipActive && fpsMode === "preview"
