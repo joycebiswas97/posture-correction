@@ -5,7 +5,8 @@ import {
 } from "../pose/constants";
 import { createPoseLandmarker } from "../pose/createPoseLandmarker";
 import { drawPose } from "../pose/drawPose";
-import { readPosture } from "../pose/readPosture";
+import { drawStatusBadge } from "../pose/drawStatusBadge";
+import { evaluatePosture, readPosture } from "../pose/readPosture";
 import { createTickerWorker } from "../pose/tickerWorker";
 
 function cameraErrorMessage(error) {
@@ -28,9 +29,14 @@ function snapshotPose(result) {
   }));
 }
 
-export function usePoseCamera() {
+export function usePoseCamera({
+  canvasRef: propCanvasRef = null,
+  calibration = null,
+  isPipActive = false,
+} = {}) {
   const videoRef = useRef(null);
-  const canvasRef = useRef(null);
+  const localCanvasRef = useRef(null);
+  const canvasRef = propCanvasRef || localCanvasRef;
   const landmarkerRef = useRef(null);
   const streamRef = useRef(null);
   const rafRef = useRef(0);
@@ -43,18 +49,47 @@ export function usePoseCamera() {
   const isProcessingRef = useRef(false);
   const frameCountRef = useRef(0);
   const fpsStampRef = useRef(0);
+  const calibrationRef = useRef(calibration);
 
   const [modelState, setModelState] = useState("loading");
   const [delegate, setDelegate] = useState("");
   const [cameraState, setCameraState] = useState("off");
   const [error, setError] = useState("");
   const [metrics, setMetrics] = useState(null);
+  const [postureStatus, setPostureStatus] = useState({
+    status: "searching",
+    label: "Searching Pose",
+  });
   const [fps, setFps] = useState(0);
   const [frameAspect, setFrameAspect] = useState(4 / 3);
   const [fpsMode, setFpsMode] = useState("preview"); // 'preview' (15 FPS) | 'saver' (1 FPS)
   const [isTabHidden, setIsTabHidden] = useState(
     typeof document !== "undefined" ? document.hidden : false
   );
+  const [isPipActiveInternal, setIsPipActiveInternal] = useState(
+    () =>
+      typeof document !== "undefined" &&
+      Boolean(document.pictureInPictureElement)
+  );
+
+  // Keep calibration ref updated
+  useEffect(() => {
+    calibrationRef.current = calibration;
+  }, [calibration]);
+
+  // Track Picture-in-Picture window events directly on document
+  useEffect(() => {
+    const handlePipEnter = () => setIsPipActiveInternal(true);
+    const handlePipLeave = () => setIsPipActiveInternal(false);
+
+    document.addEventListener("enterpictureinpicture", handlePipEnter, true);
+    document.addEventListener("leavepictureinpicture", handlePipLeave, true);
+
+    return () => {
+      document.removeEventListener("enterpictureinpicture", handlePipEnter, true);
+      document.removeEventListener("leavepictureinpicture", handlePipLeave, true);
+    };
+  }, []);
 
   // Initialize MediaPipe Pose Lite and the background ticker worker
   useEffect(() => {
@@ -142,6 +177,7 @@ export function usePoseCamera() {
         console.error("Detection error:", detectError);
       }
 
+      // Draw mirrored camera feed & pose skeleton
       ctx.setTransform(1, 0, 0, 1, 0, 0);
       ctx.clearRect(0, 0, width, height);
       ctx.save();
@@ -154,12 +190,21 @@ export function usePoseCamera() {
       ctx.restore();
 
       // Read current posture metrics (nose-to-shoulder, tilt)
-      setMetrics(readPosture(landmarksRef.current));
+      const currentMetrics = readPosture(landmarksRef.current);
+      setMetrics(currentMetrics);
+
+      const evaluation = evaluatePosture(currentMetrics, calibrationRef.current);
+      setPostureStatus(evaluation);
+
+      // Render the high-contrast posture status badge on the canvas (mirrored restored)
+      drawStatusBadge(ctx, evaluation);
 
       // Calculate actual rolling FPS
       frameCountRef.current += 1;
       const nowTime = performance.now();
-      if (nowTime - fpsStampRef.current >= 1000) {
+      if (fpsStampRef.current === 0) {
+        fpsStampRef.current = nowTime;
+      } else if (nowTime - fpsStampRef.current >= 1000) {
         const measured = Math.round(
           (frameCountRef.current * 1000) / (nowTime - fpsStampRef.current)
         );
@@ -170,7 +215,7 @@ export function usePoseCamera() {
     } finally {
       isProcessingRef.current = false;
     }
-  }, []);
+  }, [canvasRef]);
 
   const processFrameRef = useRef(processFrame);
   useEffect(() => {
@@ -188,8 +233,9 @@ export function usePoseCamera() {
 
   // Synchronize execution cadence based on:
   // 1. Camera state (on/off)
-  // 2. Tab visibility (hidden -> always use Web Worker to defeat background timer freezing)
+  // 2. Tab visibility (hidden/visible)
   // 3. User FPS mode (preview 15 FPS vs saver 1 FPS)
+  // 4. Picture-in-Picture state (if PiP is active, user is actively watching -> keep 15 FPS!)
   useEffect(() => {
     if (cameraState !== "on") {
       cancelAnimationFrame(rafRef.current);
@@ -198,15 +244,29 @@ export function usePoseCamera() {
     }
 
     const ticker = workerRef.current;
+    const pipActive = isPipActive || isPipActiveInternal;
 
-    // If tab is hidden or user selected Saver Mode: run via unthrottled Web Worker (1 FPS)
-    if (isTabHidden || fpsMode === "saver") {
+    // Run at 1 FPS (Saver Mode) ONLY IF:
+    // - User explicitly set Saver Mode, OR
+    // - The tab is hidden AND PiP is NOT active (nobody is watching the video)
+    const runSaverRate = fpsMode === "saver" || (isTabHidden && !pipActive);
+
+    if (runSaverRate) {
       cancelAnimationFrame(rafRef.current);
       ticker?.start(SAVER_INTERVAL_MS);
       return;
     }
 
-    // Otherwise, tab is visible and Preview Mode (15 FPS) is active
+    // Otherwise, user is in Preview Mode (15 FPS target)!
+    // If the tab is hidden but PiP is active, browser pauses requestAnimationFrame.
+    // The Web Worker MUST drive the 15 FPS cadence so the floating PiP window remains smooth!
+    if (isTabHidden) {
+      cancelAnimationFrame(rafRef.current);
+      ticker?.start(PREVIEW_INTERVAL_MS);
+      return;
+    }
+
+    // If the tab is visible and Preview Mode is active: drive via requestAnimationFrame
     ticker?.stop();
     let isCancelled = false;
 
@@ -225,7 +285,7 @@ export function usePoseCamera() {
       isCancelled = true;
       cancelAnimationFrame(rafRef.current);
     };
-  }, [cameraState, fpsMode, isTabHidden]);
+  }, [cameraState, fpsMode, isTabHidden, isPipActive, isPipActiveInternal]);
 
   const stop = useCallback(() => {
     sessionRef.current += 1;
@@ -246,10 +306,13 @@ export function usePoseCamera() {
     if (canvas && ctx) ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     setMetrics(null);
+    setPostureStatus({ status: "searching", label: "Camera Off" });
     setFps(0);
+    fpsStampRef.current = 0;
+    frameCountRef.current = 0;
     setFrameAspect(4 / 3);
     setCameraState("off");
-  }, []);
+  }, [canvasRef]);
 
   const start = useCallback(async () => {
     if (!landmarkerRef.current || runningRef.current) return;
@@ -291,7 +354,7 @@ export function usePoseCamera() {
       if (session !== sessionRef.current) return;
 
       frameCountRef.current = 0;
-      fpsStampRef.current = performance.now();
+      fpsStampRef.current = 0;
       runningRef.current = true;
       setCameraState("on");
     } catch (startError) {
@@ -310,11 +373,13 @@ export function usePoseCamera() {
     cameraState,
     error,
     metrics,
+    postureStatus,
     fps,
     frameAspect,
     fpsMode,
     setFpsMode,
     isTabHidden,
+    isPipActive: isPipActive || isPipActiveInternal,
     start,
     stop,
   };
