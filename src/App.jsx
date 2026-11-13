@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { PREVIEW_FPS, SAVER_FPS } from "./pose/constants";
 import { usePictureInPicture } from "./hooks/usePictureInPicture";
 import { usePoseCamera } from "./hooks/usePoseCamera";
+import { usePostureAlerts } from "./hooks/usePostureAlerts";
 import { usePostureCalibration } from "./hooks/usePostureCalibration";
 
 function percent(value) {
@@ -32,7 +33,6 @@ export default function App() {
   const {
     videoRef,
     modelState,
-    delegate,
     cameraState,
     error,
     metrics,
@@ -47,6 +47,19 @@ export default function App() {
   } = usePoseCamera({ canvasRef, isPipActive, calibration });
 
   const cameraOn = cameraState === "on";
+
+  // Alert system: Web Audio Chime + 5-second slouch accumulator + Desktop Notifications
+  const {
+    isMuted,
+    volume,
+    slouchSeconds,
+    cooldownSeconds,
+    notificationPermission,
+    toggleMute,
+    setVolume,
+    testChime,
+    requestNotificationPermission,
+  } = usePostureAlerts({ postureStatus, cameraOn });
 
   // Automatically close PiP if the user stops the camera
   useEffect(() => {
@@ -66,7 +79,7 @@ export default function App() {
 
   return (
     <div className="min-h-svh">
-      {/* Off-screen auxiliary video element with real dimensions for smooth Picture-in-Picture */}
+      {/* Off-screen auxiliary video element for streaming canvas to Picture-in-Picture */}
       <video
         ref={pipVideoRef}
         autoPlay
@@ -76,8 +89,8 @@ export default function App() {
           position: "fixed",
           top: -9999,
           left: -9999,
-          width: 320,
-          height: 240,
+          width: 300,
+          height: 200,
           pointerEvents: "none",
         }}
       />
@@ -88,18 +101,45 @@ export default function App() {
             <p className="text-xs font-medium tracking-[0.18em] text-emerald-300/80 uppercase">
               Posture monitor
             </p>
-            <h1 className="mt-1 text-2xl font-semibold tracking-tight">Live Pose & Calibration</h1>
+            <h1 className="mt-1 text-2xl font-semibold tracking-tight">Real-Time Posture Guardian</h1>
           </div>
-          <div className="flex flex-col items-start sm:items-end gap-1">
-            <p className="max-w-xs text-sm text-white/55 sm:text-right">
-              Pose Lite model runs locally in your browser. Nothing leaves your device.
-            </p>
-            {cameraOn && (
-              <span className="inline-flex items-center gap-1.5 text-xs text-emerald-400 bg-emerald-950/60 border border-emerald-500/30 px-2.5 py-0.5 rounded-full">
-                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400 animate-pulse" />
-                Anti-throttling worker active
+          <div className="flex flex-wrap items-center gap-2">
+            {/* Desktop Notification Pill */}
+            {notificationPermission === "granted" ? (
+              <span className="inline-flex items-center gap-1.5 text-xs text-emerald-300 bg-emerald-950/60 border border-emerald-500/30 px-3 py-1 rounded-full">
+                <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                Desktop alerts active
               </span>
+            ) : notificationPermission === "denied" ? (
+              <span className="inline-flex items-center gap-1 text-xs text-red-300/80 bg-red-950/40 border border-red-500/20 px-3 py-1 rounded-full" title="Desktop notifications blocked in browser site settings">
+                🔕 Alerts blocked
+              </span>
+            ) : (
+              <button
+                type="button"
+                onClick={requestNotificationPermission}
+                className="inline-flex items-center gap-1.5 text-xs text-amber-200 bg-amber-950/50 hover:bg-amber-900/60 border border-amber-400/40 px-3 py-1 rounded-full cursor-pointer transition shadow-xs"
+                title="Enable OS Desktop Notifications to alert you when working in VS Code"
+              >
+                <span>🔔</span>
+                <span>Enable Desktop Alerts</span>
+              </button>
             )}
+
+            {/* Quick Mute Toggle */}
+            <button
+              type="button"
+              onClick={toggleMute}
+              className={`inline-flex items-center gap-1 text-xs px-3 py-1 rounded-full border cursor-pointer transition ${
+                isMuted
+                  ? "bg-white/5 text-white/50 border-white/10"
+                  : "bg-white/10 text-white/90 border-white/20 hover:bg-white/15"
+              }`}
+              title={isMuted ? "Unmute audio chime alerts" : "Mute audio chime alerts"}
+            >
+              <span>{isMuted ? "🔇" : "🔊"}</span>
+              <span>{isMuted ? "Muted" : "Sound on"}</span>
+            </button>
           </div>
         </div>
       </header>
@@ -122,7 +162,7 @@ export default function App() {
               <div className="absolute inset-0 grid place-items-center px-6 text-center text-sm text-white/60">
                 {cameraState === "starting"
                   ? "Waiting for the camera…"
-                  : "Start the camera to see your pose and calibrate your posture."}
+                  : "Start the camera to begin monitoring your posture across all apps."}
               </div>
             )}
 
@@ -144,6 +184,34 @@ export default function App() {
               )}
             </div>
 
+            {/* 5-Second Slouch Countdown Fill Bar overlay */}
+            {cameraOn && postureStatus.status === "slouch" && (
+              <div className="absolute top-14 left-3 right-3 sm:right-auto sm:w-80 bg-red-950/85 backdrop-blur-md border border-red-500/40 p-3 rounded-2xl shadow-xl transition-all">
+                <div className="flex items-center justify-between text-xs text-red-200">
+                  <span className="font-semibold flex items-center gap-1.5">
+                    <span className="h-2 w-2 rounded-full bg-red-400 animate-ping" />
+                    Slouching Detected
+                  </span>
+                  <span className="font-mono tabular-nums text-red-300 font-bold">
+                    {slouchSeconds.toFixed(1)}s / 5.0s
+                  </span>
+                </div>
+                <div className="mt-2 h-1.5 w-full bg-black/40 rounded-full overflow-hidden">
+                  <div
+                    className="h-full bg-red-400 transition-all duration-200 rounded-full"
+                    style={{ width: `${(slouchSeconds / 5) * 100}%` }}
+                  />
+                </div>
+                <p className="mt-1.5 text-[11px] text-red-200/70">
+                  {slouchSeconds >= 5
+                    ? cooldownSeconds > 0
+                      ? `Alert dispatched! Cooldown: ${cooldownSeconds}s`
+                      : "Alerting: Sitting straight resets timer"
+                    : `Alert will trigger in ${(5 - slouchSeconds).toFixed(1)}s`}
+                </p>
+              </div>
+            )}
+
             {/* Calibration feedback toast overlay */}
             {justCalibrated && (
               <div className="absolute bottom-4 left-1/2 -translate-x-1/2 flex items-center gap-2 bg-emerald-500/90 text-emerald-950 font-semibold px-4 py-2 rounded-full text-xs shadow-lg backdrop-blur-md transition-all animate-bounce">
@@ -156,7 +224,7 @@ export default function App() {
             {cameraOn && metrics && !isCalibrated && !justCalibrated && (
               <div className="absolute bottom-3 left-3 right-3 sm:left-auto sm:right-3 bg-black/75 backdrop-blur-md border border-amber-400/40 text-amber-200 text-xs px-3.5 py-2 rounded-xl flex items-center gap-2 shadow-md">
                 <span className="text-amber-400 font-bold">💡 Tip:</span>
-                <span>Sit straight and click <strong>Calibrate</strong> to set your personal baseline.</span>
+                <span>Sit straight and click <strong>Calibrate</strong> to customize forward-lean detection.</span>
               </div>
             )}
           </div>
@@ -350,6 +418,71 @@ export default function App() {
             )}
           </div>
 
+          {/* Sound & Alert Controls Card */}
+          <div className="rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3">
+            <p className="text-xs tracking-wide text-white/45 uppercase">Cross-App Alert Engine</p>
+            
+            <div className="mt-3 flex flex-col gap-2.5 text-xs">
+              <div className="flex items-center justify-between">
+                <span className="text-white/70">Audio Chime:</span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={testChime}
+                    disabled={isMuted}
+                    className="px-2 py-0.5 rounded-md bg-white/5 hover:bg-white/15 text-white/80 transition cursor-pointer disabled:opacity-30"
+                    title="Play test chime"
+                  >
+                    Test
+                  </button>
+                  <button
+                    type="button"
+                    onClick={toggleMute}
+                    className={`px-2 py-0.5 rounded-md font-medium transition cursor-pointer ${
+                      isMuted ? "bg-red-500/20 text-red-300 border border-red-500/30" : "bg-emerald-500/20 text-emerald-300"
+                    }`}
+                  >
+                    {isMuted ? "Muted" : "Active"}
+                  </button>
+                </div>
+              </div>
+
+              {/* Volume Slider */}
+              <div className="flex items-center justify-between gap-3 pt-1">
+                <span className="text-white/70">Volume:</span>
+                <input
+                  type="range"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  value={volume}
+                  onChange={(e) => setVolume(parseFloat(e.target.value))}
+                  disabled={isMuted}
+                  className="w-28 accent-emerald-400 cursor-pointer disabled:opacity-30"
+                />
+                <span className="w-8 text-right tabular-nums text-white/60">
+                  {Math.round(volume * 100)}%
+                </span>
+              </div>
+
+              {/* Desktop Notification status */}
+              <div className="flex items-center justify-between pt-1 border-t border-white/5">
+                <span className="text-white/70">Desktop Alert:</span>
+                <span className={`font-medium ${notificationPermission === "granted" ? "text-emerald-300" : "text-white/50"}`}>
+                  {notificationPermission === "granted" ? "Active (VS Code)" : "Off"}
+                </span>
+              </div>
+
+              {/* Cooldown telemetry */}
+              <div className="flex items-center justify-between text-white/50 text-[11px]">
+                <span>Alert Cooldown:</span>
+                <span className="tabular-nums">
+                  {cooldownSeconds > 0 ? `${cooldownSeconds}s cooldown` : "Ready (30s)"}
+                </span>
+              </div>
+            </div>
+          </div>
+
           {/* Personal Calibration Card */}
           <div className="rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3">
             <div className="flex items-center justify-between">
@@ -368,8 +501,12 @@ export default function App() {
             {isCalibrated ? (
               <div className="mt-2 flex flex-col gap-1 text-xs">
                 <div className="flex justify-between text-white/80">
-                  <span>Upright nose height:</span>
-                  <span className="font-medium tabular-nums">{percent(calibration.noseToShoulder)}</span>
+                  <span>Upright head depth:</span>
+                  <span className="font-medium tabular-nums">{percent(calibration.headForwardDepth || 0.05)}</span>
+                </div>
+                <div className="flex justify-between text-white/80">
+                  <span>Upright head ratio:</span>
+                  <span className="font-medium tabular-nums">{percent(calibration.headToShoulderRatio || 0.45)}</span>
                 </div>
                 <div className="flex justify-between text-white/80">
                   <span>Shoulder level tilt:</span>
@@ -400,19 +537,13 @@ export default function App() {
           />
 
           <StatusCard
-            label="Engine"
-            value={modelValue(modelState, delegate)}
-            hint="Pose Lite runs in-browser with GPU/CPU fallback."
-          />
-
-          <StatusCard
             label="Head position (vs Background)"
             value={
               !cameraOn || !metrics
                 ? "—"
                 : postureStatus.reason === "Head leaning too far forward"
                   ? "⚠️ Leaning Forward"
-                  : postureStatus.reason === "Head dropped forward"
+                  : postureStatus.reason === "Severe head drop / slump"
                     ? "⚠️ Dropped Down"
                     : "✓ Upright & Aligned"
             }
@@ -440,28 +571,10 @@ export default function App() {
                     : "Fluid 15 FPS skeleton tracking."
             }
           />
-
-          <StatusCard
-            label="Nose above shoulders"
-            value={metrics ? percent(metrics.noseToShoulder) : "—"}
-            hint="Shrinks when your head tilts or drops forward."
-          />
-
-          <StatusCard
-            label="Shoulder tilt"
-            value={metrics ? percent(metrics.shoulderTilt) : "—"}
-            hint="Difference in vertical level between shoulders."
-          />
         </aside>
       </main>
     </div>
   );
-}
-
-function modelValue(modelState, delegate) {
-  if (modelState === "loading") return "Loading Pose Lite…";
-  if (modelState === "error") return "Failed to load";
-  return `Pose Lite · ${delegate}`;
 }
 
 function StatusCard({ label, value, hint }) {
