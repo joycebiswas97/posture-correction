@@ -12,6 +12,7 @@ function percent(value) {
 
 export default function App() {
   const canvasRef = useRef(null);
+  const pipCanvasRef = useRef(null);
 
   const {
     calibration,
@@ -21,6 +22,7 @@ export default function App() {
     resetCalibration,
   } = usePostureCalibration();
 
+  // PiP hook: supports ultra-compact Document PiP (140x48) with Video PiP fallback
   const {
     pipVideoRef,
     isPipSupported,
@@ -28,7 +30,8 @@ export default function App() {
     pipError,
     togglePip,
     closePip,
-  } = usePictureInPicture(canvasRef);
+    updatePipStatus,
+  } = usePictureInPicture(pipCanvasRef);
 
   const {
     videoRef,
@@ -61,6 +64,18 @@ export default function App() {
     requestNotificationPermission,
   } = usePostureAlerts({ postureStatus, cameraOn });
 
+  // Update the dedicated compact PiP widget (Document PiP or canvas fallback)
+  useEffect(() => {
+    updatePipStatus({
+      status: cameraOn ? postureStatus?.status || "searching" : "searching",
+      label: cameraOn ? postureStatus?.label || "Searching Pose" : "Camera Off",
+      reason: cameraOn ? postureStatus?.reason || "" : "",
+      score: cameraOn ? postureStatus?.score : 0,
+      slouchSeconds,
+      cameraOn,
+    });
+  }, [cameraOn, postureStatus, slouchSeconds, updatePipStatus]);
+
   // Automatically close PiP if the user stops the camera
   useEffect(() => {
     if (!cameraOn && isPipActive) {
@@ -79,7 +94,20 @@ export default function App() {
 
   return (
     <div className="min-h-svh">
-      {/* Off-screen auxiliary video element for streaming canvas to Picture-in-Picture */}
+      {/* Dedicated off-screen canvas for the 2:1 micro PiP status card (High-DPI 240x120 for crystal clarity) */}
+      <canvas
+        ref={pipCanvasRef}
+        width={240}
+        height={120}
+        style={{
+          position: "fixed",
+          top: -9999,
+          left: -9999,
+          pointerEvents: "none",
+        }}
+      />
+
+      {/* Auxiliary video element streaming the 2:1 PiP status canvas */}
       <video
         ref={pipVideoRef}
         autoPlay
@@ -89,8 +117,8 @@ export default function App() {
           position: "fixed",
           top: -9999,
           left: -9999,
-          width: 300,
-          height: 200,
+          width: 240,
+          height: 120,
           pointerEvents: "none",
         }}
       />
@@ -111,7 +139,10 @@ export default function App() {
                 Desktop alerts active
               </span>
             ) : notificationPermission === "denied" ? (
-              <span className="inline-flex items-center gap-1 text-xs text-red-300/80 bg-red-950/40 border border-red-500/20 px-3 py-1 rounded-full" title="Desktop notifications blocked in browser site settings">
+              <span
+                className="inline-flex items-center gap-1 text-xs text-red-300/80 bg-red-950/40 border border-red-500/20 px-3 py-1 rounded-full"
+                title="Desktop notifications blocked in browser site settings"
+              >
                 🔕 Alerts blocked
               </span>
             ) : (
@@ -166,11 +197,11 @@ export default function App() {
               </div>
             )}
 
-            {/* Live badge overlay on top right */}
+            {/* Live badge overlay on top right of main video */}
             <div className="absolute top-3 right-3 flex flex-wrap items-center gap-2">
               <span className="rounded-full bg-black/60 backdrop-blur-md px-3 py-1 text-xs text-white/90 border border-white/10">
                 {isPipActive
-                  ? `📺 Mini Monitor · ${fpsMode === "saver" ? "1 FPS (Saver)" : "15 FPS (Smooth)"}`
+                  ? `📺 Floating Mini Widget · ${fpsMode === "saver" ? "1 FPS" : "15 FPS"}`
                   : isTabHidden
                     ? "🛡️ Background mode · Worker 1 FPS"
                     : fpsMode === "saver"
@@ -278,7 +309,7 @@ export default function App() {
                 )}
               </div>
 
-              {/* PiP Pop-out Button */}
+              {/* PiP Pop-out Button (Compact Status Widget Only) */}
               {isPipSupported && (
                 <button
                   type="button"
@@ -289,7 +320,7 @@ export default function App() {
                       ? "bg-emerald-500/20 text-emerald-300 border-emerald-400/40 shadow-xs"
                       : "bg-white/5 text-white/90 border-white/10 hover:bg-white/10 hover:border-white/20 disabled:cursor-not-allowed disabled:opacity-40"
                   }`}
-                  title="Pop out a floating window with posture badge over VS Code and other apps"
+                  title="Pop out a tiny floating status widget over VS Code (no camera view, status only)"
                 >
                   <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path
@@ -305,7 +336,7 @@ export default function App() {
                       d="M13 11h5v5h-5z"
                     />
                   </svg>
-                  {isPipActive ? "Exit Mini Monitor" : "Pop-out Mini Monitor"}
+                  {isPipActive ? "Close Floating Widget" : "Pop-out Floating Widget"}
                 </button>
               )}
 
@@ -421,7 +452,7 @@ export default function App() {
           {/* Sound & Alert Controls Card */}
           <div className="rounded-2xl border border-white/10 bg-white/[0.03] px-4 py-3">
             <p className="text-xs tracking-wide text-white/45 uppercase">Cross-App Alert Engine</p>
-            
+
             <div className="mt-3 flex flex-col gap-2.5 text-xs">
               <div className="flex items-center justify-between">
                 <span className="text-white/70">Audio Chime:</span>
@@ -439,7 +470,9 @@ export default function App() {
                     type="button"
                     onClick={toggleMute}
                     className={`px-2 py-0.5 rounded-md font-medium transition cursor-pointer ${
-                      isMuted ? "bg-red-500/20 text-red-300 border border-red-500/30" : "bg-emerald-500/20 text-emerald-300"
+                      isMuted
+                        ? "bg-red-500/20 text-red-300 border border-red-500/30"
+                        : "bg-emerald-500/20 text-emerald-300"
                     }`}
                   >
                     {isMuted ? "Muted" : "Active"}
@@ -468,7 +501,11 @@ export default function App() {
               {/* Desktop Notification status */}
               <div className="flex items-center justify-between pt-1 border-t border-white/5">
                 <span className="text-white/70">Desktop Alert:</span>
-                <span className={`font-medium ${notificationPermission === "granted" ? "text-emerald-300" : "text-white/50"}`}>
+                <span
+                  className={`font-medium ${
+                    notificationPermission === "granted" ? "text-emerald-300" : "text-white/50"
+                  }`}
+                >
                   {notificationPermission === "granted" ? "Active (VS Code)" : "Off"}
                 </span>
               </div>
@@ -525,15 +562,15 @@ export default function App() {
           </div>
 
           <StatusCard
-            label="Floating Mini Monitor"
+            label="Floating Mini Widget"
             value={
               !isPipSupported
                 ? "Not supported in this browser"
                 : isPipActive
-                  ? `Active (${fpsMode === "saver" ? "1 FPS Saver" : "15 FPS Smooth"})`
+                  ? "Floating Status Widget"
                   : "Standby"
             }
-            hint="Streams the canvas and posture badge over VS Code or other desktop apps."
+            hint="Displays a compact floating badge (status only, no camera view) over other apps."
           />
 
           <StatusCard
@@ -554,7 +591,7 @@ export default function App() {
             label="Power mode"
             value={
               isPipActive && fpsMode === "preview"
-                ? "Mini Monitor Smooth (15 FPS Worker)"
+                ? "Mini Widget (15 FPS Worker)"
                 : isTabHidden
                   ? "Background Worker (1 FPS)"
                   : fpsMode === "saver"
@@ -563,12 +600,12 @@ export default function App() {
             }
             hint={
               isPipActive && fpsMode === "preview"
-                ? "Web Worker drives 15 FPS so PiP remains fluid over other apps."
+                ? "Web Worker drives 15 FPS so floating widget remains responsive."
                 : isTabHidden
                   ? "Tab hidden: Web Worker timer prevents browser throttling."
                   : fpsMode === "saver"
                     ? "Duty cycle <2.5%, CPU usage remains under 5%."
-                    : "Fluid 15 FPS skeleton tracking."
+                    : "Fluid 15 FPS tracking."
             }
           />
         </aside>
